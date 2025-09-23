@@ -10,7 +10,7 @@ Before running the scripts, set up the required environment.
 1.  **Clone the repository** (or download the files).
 
     ```bash
-    git clone https://github.com/itsalissonsilva/ds_bigdata_hackathon
+    git clone https://github.com/Senhores-do-Tempo/ds_bigdata_hackathon
     ```
 
 2.  **Install the dependencies** by running the following command in your terminal from the project's root directory:

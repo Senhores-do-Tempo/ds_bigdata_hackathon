@@ -1,64 +1,83 @@
+#!/usr/bin/env python3
+# evaluate.py  (no argparse, just hardcoded paths)
+
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import joblib
-import os
+from lightgbm import LGBMRegressor
 
-def wmape(y_true, y_pred):
-    """Calculates the Weighted Mean Absolute Percentage Error (WMAPE)."""
-    sum_abs_err = np.sum(np.abs(y_true - y_pred))
-    sum_actual = np.sum(np.abs(y_true))
-    return sum_abs_err / (sum_actual + 1e-10)
+BASE_DIR   = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+TEST_CSV   = PROJECT_ROOT / "data" / "test.csv"
+MODEL_PATH = PROJECT_ROOT / "models" / "lgbm_model_cap.pkl"              # e.g., test_folder/lgbm_model_cap.pkl
+OUT_PREDS  = PROJECT_ROOT / "results" / "predictions.csv"
+
+def wmape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    denom = np.abs(y_true).sum() + 1e-9
+    return float(np.abs(y_true - y_pred).sum() / denom)
 
 def main():
-    print("Starting evaluation script...")
+    # Sanity checks
+    if not TEST_CSV.exists():
+        raise FileNotFoundError(f"Missing test CSV at: {TEST_CSV}")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Missing model file at: {MODEL_PATH}")
 
-    model_assets_path = os.path.join('models', 'lgbm_model.pkl')
-    data_path = os.path.join('data', 'test.csv')
-    results_folder = 'results'
-    
-    try:
-        loaded_assets = joblib.load(model_assets_path)
-        model = loaded_assets['model']
-        train_categories = loaded_assets['categories']
-        print(f"Successfully loaded model and categories from '{model_assets_path}'")
-        
-        df_to_evaluate = pd.read_csv(data_path)
-        print(f"Successfully loaded preprocessed data from '{data_path}'")
-        
-    except FileNotFoundError as e:
-        print(f"Error loading files: {e}")
-        return
+    print(f"Reading test set from: {TEST_CSV}")
+    df = pd.read_csv(TEST_CSV)
 
-    features = model.feature_name_
-    target = 'quantidade'
-    
-    X_eval = df_to_evaluate[features].copy()
-    y_actual = df_to_evaluate[target].copy()
-    
-    print("Aligning categorical features with training data...")
-    for col, cats in train_categories.items():
-        if col in X_eval.columns:
-            X_eval[col] = pd.Categorical(X_eval[col], categories=cats)
+    # Categorical columns must be category dtype (same as training)
+    cat_cols = ["pdv","produto","premise","categoria_pdv","categoria","tipos","label","subcategoria","marca","fabricante"]
+    for c in cat_cols:
+        if c in df.columns:
+            df[c] = df[c].astype("category")
 
-    numerical_cols = X_eval.select_dtypes(include=np.number).columns
-    X_eval[numerical_cols] = X_eval[numerical_cols].fillna(0)
-    
-    print("Making predictions on the new data...")
-    predictions = model.predict(X_eval)
+    # Exact training feature order
+    feature_cols = [
+        "pdv","produto","week_ord",
+        "lag1","lag2","lag3","lag4","rmean4","rmean12",
+        "price_gross","price_net","margin","disc","taxes",
+        "price_gross_lag1","price_net_lag1","margin_lag1","disc_lag1","taxes_lag1",
+        "store_rmean4","prod_rmean4",
+        "premise","categoria_pdv","categoria","tipos","label","subcategoria","marca","fabricante",
+        "zipcode",
+    ]
 
-    wmape_score = wmape(y_actual, predictions)
-    print("\n--- EVALUATION COMPLETE ---")
-    print(f"Model Performance on New Data (WMAPE): {wmape_score:.4f}")
+    # Ensure ALL expected features exist and in the exact order (add missing as NaN)
+    for col in feature_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    X = df.reindex(columns=feature_cols)
 
-    # Save results for inspection
-    results_df = df_to_evaluate[['ano', 'semana', 'internal_store_id', 'internal_product_id']].copy()
-    results_df['actual_quantity'] = y_actual
-    results_df['predicted_quantity'] = predictions.round().astype(int)
-    
-    os.makedirs(results_folder, exist_ok=True)
-    results_path = os.path.join(results_folder, 'evaluation_results.csv')
-    results_df.to_csv(results_path, index=False, encoding='utf-8')
-    print(f"Saved evaluation results to '{results_path}'")
+    # Use only rows where we have ground truth for evaluation
+    if "target_next" not in df.columns:
+        raise ValueError("Column 'target_next' not found in test.csv (did preprocessing include it?).")
+
+    valid = df["target_next"].notna()
+    if valid.sum() == 0:
+        raise ValueError(
+            "No rows with non-NaN target_next in test.csv. "
+            "Generate test.csv with January + some history so next-week targets exist."
+        )
+
+    Xv = X.loc[valid]
+    y_true = df.loc[valid, "target_next"].astype(float).values
+
+    print(f"Loading model from: {MODEL_PATH}")
+    model: LGBMRegressor = joblib.load(MODEL_PATH)
+
+    print("Predicting…")
+    y_pred = model.predict(Xv)
+
+    score = wmape(y_true, y_pred)
+    print(f"WMAPE on {valid.sum()} rows: {score:.6f}")
+
+    OUT_PREDS.parent.mkdir(parents=True, exist_ok=True)
+    out = df.loc[valid, ["week_end","pdv","produto","quantidade","target_next"]].copy()
+    out["pred"] = y_pred
+    out.to_csv(OUT_PREDS, index=False)
+    print(f"Saved predictions to: {OUT_PREDS}")
 
 if __name__ == "__main__":
     main()
